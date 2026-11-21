@@ -17,6 +17,12 @@ synsaveinstance(Options)
 
 Support the original developers' work, as they've made a huge impact on the community it has been a part of.
 
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M4M1JNH5G)
+
+Ko-fi: https://ko-fi.com/M4M1JNH5G
+
+Discord: https://discord.gg/wx4ThpAsmw
+
 # Acknowledgments
 > [!IMPORTANT]
 > This document is based largely on the efforts of [@Anaminus] & [@Dekkonot], authors of the [Roblox Format Specifications]. Additional

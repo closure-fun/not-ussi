@@ -100,7 +100,6 @@ do
 end
 
 local identify_executor = identifyexecutor or getexecutorname or whatexecutor
-
 local EXECUTOR_NAME = identify_executor and identify_executor() or ""
 
 local setrbxclipboard = global_container.setrbxclipboard
@@ -122,11 +121,18 @@ local getscriptbytecode = global_container.getscriptbytecode -- * A lot of assum
 local base64encode = global_container.base64encode
 local base64decode = global_container.base64decode
 
-local sharedStringId = 1e15 -- 1 quadrillion, up to 9.(9) quadrillion, in theory this shouldn't ever run out and be enough for all sharedstrings ever imaginable 	-- TODO: worst case, add fallback to str randomizer once numbers run out : )
+-- 2^53. Past this, `number += 1` is no longer exact, so new ids come from GenerateGUID.
+local SHARED_ID_LIMIT = 9007199254740992
+local sharedStringId = 1e15
 local sharedStrings = setmetatable({}, {
 	__index = function(self, str)
-		local id = base64encode(tostring(sharedStringId)) -- tostring is only needed for built-in base64encode, Luau base64 implementations don't need it as buffers autoconvert
-		sharedStringId += 1
+		local id
+		if sharedStringId < SHARED_ID_LIMIT then
+			id = base64encode(tostring(sharedStringId)) -- tostring is only needed for built-in base64encode, Luau base64 implementations don't need it as buffers autoconvert
+			sharedStringId += 1
+		else
+			id = base64encode(service.HttpService:GenerateGUID(false))
+		end
 
 		self[str] = id -- ? The value of the md5 attribute is a Base64-encoded key. <SharedString> type elements use this key to refer to the value of the string. The value is the text content, which is Base64-encoded. Historically, the key was the MD5 hash of the string value. However, this is not required; the key can be any value that will uniquely identify the shared string. Roblox currently uses BLAKE2b truncated to 16 bytes..
 		return id
@@ -135,6 +141,29 @@ local sharedStrings = setmetatable({}, {
 
 local inheritedProperties = {}
 local defaultInstances = {}
+local defaultNames = {}
+
+local KNOWN_DEFAULT_NAMES = {
+	TouchTransmitter = "TouchInterest",
+}
+
+local function defaultInstanceName(className)
+	local known = defaultNames[className]
+	if known ~= nil then
+		return known
+	end
+
+	local name
+	local ok, inst = pcall(Instance.new, className)
+	if ok then
+		name = inst.Name
+		inst:Destroy()
+	else
+		name = KNOWN_DEFAULT_NAMES[className] or className
+	end
+	defaultNames[className] = name
+	return name
+end
 
 local function index(self, index_name)
 	return self[index_name]
@@ -467,7 +496,7 @@ local function zigzag32(v)
 end
 
 local function splitU64(v)
-	local hi = math.floor(v / 4294967296)
+	local hi = v // 4294967296
 	return hi, v - hi * 4294967296
 end
 
@@ -3653,7 +3682,7 @@ end
 --- case-sensitive: `NilInstances`, `nilinstances`, and `nilInStaNces` are the
 --- same option. Unknown names are ignored.
 --- @within UniversalSynSaveInstance
---- @field mode string -- What to save. `optimized` saves the most important services (Workspace, Players, Lighting, ReplicatedStorage, StarterGui, and others). `full` saves everything under `game`. `scripts` saves only the top-level parts that contain a [LuaSourceContainer] (a script object). It saves the whole part, not just the script. Any other value saves only `ExtraInstances` (and `Object`, if set). If `Object` is set, `optimized` becomes `full`. ___Default:___ `optimized`
+--- @field mode string -- What to save. `optimized` saves the most important services (Workspace, Players, Lighting, ReplicatedStorage, StarterGui, and others). `full` saves everything under `game`, and turns `IgnoreDefaultProperties` off unless you set it yourself. `scripts` saves only the parent chain that leads to a [LuaSourceContainer] (a script object). Any other value saves only `ExtraInstances` (and `Object`, if set). If `Object` is set, `optimized` becomes `full`. ___Default:___ `optimized`
 --- @field Binary boolean -- Save a binary file (`.rbxl`/`.rbxm`) instead of an XML file (`.rbxlx`/`.rbxmx`). Binary files are smaller and load faster. If the executor cannot write binary data correctly, the script uses XML. Set the old option `XML = true` to force XML. ___Default:___ true
 --- @field CompressionMode string | boolean -- How to compress (make smaller) the binary file: `"zstd"`, `"lz4"`, or `false` for no compression. `true` means `"zstd"`. The old option `DisableCompression = true` means `false`. ___Default:___ `"zstd"`
 --- @field CompressionLevel number -- Compression level for zstd, from -7 to 22. A higher level makes a smaller file but takes longer. This is ignored for lz4 and when compression is off. ___Default:___ 9
@@ -3684,6 +3713,8 @@ end
 --- @field IgnoreList {Instance | string} | {[Instance | string]: boolean | {[string]: boolean}} -- Objects to skip. Use an [Instance] or a class name as a key to skip that object and its children. `ClassName = false` keeps the object but skips its children. `ClassName = {Name1, Name2}` skips objects with those names. You can also pass a list of Instances or class names. ___Default:___ {CoreGui, CorePackages, Packages = false}
 --- @field MaxDepth number -- Objects nested deeper than this are moved up under their ancestor at depth `MaxDepth`, so nothing is dropped, only the nesting is lost. This stops very deep hierarchies from overflowing the stack when Roblox Studio opens the file (binary saves opened at 1740 levels deep; XML saves crashed at 1750). Use `math.huge` to disable. ___Default:___ 1000
 --- @field IgnoreSpecialProperties boolean -- Do not use the executor function `gethiddenproperty`. Other property reads still work. This can help if your executor crashes or the file is corrupted. ___Default:___ false
+--- @field SpecialProperties {string} | false -- NotScriptable property names to save. `false` saves all of them. A list such as `{"AttributesSerialize", "Tags"}` saves only those names. An empty list saves none. This does nothing when `IgnoreSpecialProperties` is true. ___Default:___ false
+--- @field SkipCrashed boolean -- Skip an instance whose hidden-property read or decompile crashed a previous save, then continue. The last instance touched is stored in `ussi_cache/EXEC_STATE.json`. ___Default:___ false
 --- @field AlternativeWritefile boolean -- Write the file in smaller pieces with `appendfile` instead of one `writefile` call. For binary saves, if `appendfile` fails, it uses `writefile`; if both fail, it switches to XML. ___Default:___ true
 --- @field Anonymous boolean | {Name: string?, UserId: number?} -- **RISKY:** Replace LocalPlayer.Name and UserId in the output. `true` replaces them with `"Roblox"` and `1`. You can also pass a table with `Name` and/or `UserId`. Name matching ignores case. This can also change other text or numbers that match. ___Default:___ false
 --- @field RiskyServicesDisabled {UGC: boolean?, Encoding: boolean?, Reflection: boolean?} -- Turn off services that some games may detect. `UGC` skips [UGCValidationService] (used for some hidden properties). `Encoding` skips [EncodingService]. `Reflection` skips [ReflectionService] (used for class data). Set a flag to `true` to skip that service. If you do not set `RiskyServicesDisabled` yourself, the UGC fallback turns on automatically when `gethiddenproperty` is missing. ___Default:___ {UGC = true, Encoding = false, Reflection = false}
@@ -3696,7 +3727,7 @@ end
 --- @field SaveNotCreatable boolean -- Save classes that Roblox says are not creatable. The script replaces them with a class it can create, using `NotCreatableFixes` (usually `Folder`). This turns on automatically with `IsolatePlayers`, `IsolateLocalPlayer`, and `NilInstances` (when `getnilinstances` exists). ___Default:___ false
 --- @field NotCreatableFixes {string} | {[string]: string | false} -- Replace a class with a class that can be created. The default replacement is `"Folder"`. A list of class names also becomes `Folder`. Built-in changes: [Player], [PlayerGui], [PlayerScripts], [TouchTransmitter], and others become `Folder`; [CloudLocalizationTable] becomes [LocalizationTable]; `Platform` becomes [Part]; `Status` becomes [Model]. Set a class to `false` to skip its replacement. ___Default:___ built-in replacements
 --- @field NilInstancesFixes {[string]: ((instance: Instance, overrides: table) -> Instance?) | false} -- Where to put objects that have no parent. For example, it puts [Animator] under an [AnimationController]. Built-in fixes exist for [Animator], [AdPortal], [Attachment], [BaseWrap], and [PackageLink]. Child classes use the parent fix ([Bone]s use the Attachment fix). Set a class to `false` to turn off its fix. ___Default:___ built-in Animator/AdPortal/Attachment/BaseWrap/PackageLink fixes
---- @field IgnoreDefaultProperties boolean -- Skip properties that already have the default value for their class. This only affects XML output. Binary output does not use this option. ___Default:___ true
+--- @field IgnoreDefaultProperties boolean -- Skip properties that already have the default value for their class. This only affects XML output. Binary output does not use this option. `full` mode turns this off unless you set it yourself. ___Default:___ true
 --- @field IgnorePropertiesOfNotScriptsOnScriptsMode boolean -- Only in `scripts` mode: save properties for [LuaSourceContainer]s and skip properties for all other objects. This does nothing in other modes. ___Default:___ false
 --- @field IgnoreDefaultPlayerScripts boolean -- Skip Roblox's default player scripts (`PlayerModule`, `BubbleChat`, `ChatScript`, `PlayerScriptsLoader`, `RbxCharacterSounds`). This can stop some executors from crashing during decompile. ___Default:___ false
 --- @field SaveCacheInterval number -- How much XML data the script holds in memory while saving. Lower values update the status more often but are slower. This does not write to disk. When `KillAllScripts` is on, this also sets the script timeout between 20 and 30 seconds. ___Default:___ 0x1600 * 10
@@ -3878,6 +3909,8 @@ local function synsaveinstance(...)
 		IgnoreNotArchivable = true,
 		IgnorePropertiesOfNotScriptsOnScriptsMode = false,
 		IgnoreSpecialProperties = false,
+		SpecialProperties = false,
+		SkipCrashed = false,
 
 		IsolateLocalPlayer = false, --  #service.StarterGui:GetChildren() == 0
 		IsolateLocalPlayerCharacter = false,
@@ -4049,16 +4082,18 @@ local function synsaveinstance(...)
 			end
 		end
 
-		-- TODO: Merge BaseWrap & Attachment & AdPortal fix (put all under MeshPart container)
-		-- TODO?:
-		-- DebuggerWatch DebuggerWatch must be a child of ScriptDebugger
-		-- PluginAction Parent of PluginAction must be Plugin or PluginMenu that created it!
+		-- DebuggerWatch must be a child of ScriptDebugger
+		-- PluginAction's parent must be the Plugin or PluginMenu that created it
+		local meshHolder = makeNilinstanceFix(
+			"Attachments, Bones, and BaseWraps must be parented to a BasePart or MeshPart",
+			"MeshPart"
+		)
 		OPTIONS.NilInstancesFixes.Animator =
 			makeNilinstanceFix("Animator has to be placed under Humanoid or AnimationController", "AnimationController")
+		-- AdPortal has to be parented to a Part. MeshPart is not a Part, so it keeps its own holder.
 		OPTIONS.NilInstancesFixes.AdPortal = makeNilinstanceFix("AdPortal must be parented to a Part", "Part")
-		OPTIONS.NilInstancesFixes.Attachment =
-			makeNilinstanceFix("Attachments must be parented to a BasePart or another Attachment", "Part") -- * Bones inherit from Attachments
-		OPTIONS.NilInstancesFixes.BaseWrap = makeNilinstanceFix("BaseWrap must be parented to a MeshPart", "MeshPart")
+		OPTIONS.NilInstancesFixes.Attachment = meshHolder -- * Bones inherit from Attachments
+		OPTIONS.NilInstancesFixes.BaseWrap = meshHolder
 		OPTIONS.NilInstancesFixes.PackageLink = makeNilinstanceFix("Package already has a PackageLink", "Folder", true)
 
 		local args = table.pack(...)
@@ -4104,7 +4139,7 @@ local function synsaveinstance(...)
 
 			if Type == "table" then
 				if typeof(arg[1]) == "Instance" then -- * Array of Instances
-					OPTIONS.ExtraInstances = arg
+					OPTIONS.ExtraInstances = table.clone(arg)
 					OPTIONS.IsModel = true
 					directInstances = true
 				else
@@ -4311,6 +4346,10 @@ local function synsaveinstance(...)
 	local IgnoreNotArchivable = not OPTIONS.IgnoreNotArchivable
 	local MaxDepth = tonumber(OPTIONS.MaxDepth) or math.huge
 	local IgnorePropertiesOfNotScriptsOnScriptsMode = OPTIONS.IgnorePropertiesOfNotScriptsOnScriptsMode
+	local SpecialAllow
+	if type(OPTIONS.SpecialProperties) == "table" then
+		SpecialAllow = arrayToDict(OPTIONS.SpecialProperties)
+	end
 
 	local SaveNotCreatable = OPTIONS.SaveNotCreatable
 	local TreatUnionsAsParts = OPTIONS.TreatUnionsAsParts
@@ -4318,6 +4357,7 @@ local function synsaveinstance(...)
 	local SharedBinaryStrings = OPTIONS.SharedBinaryStrings
 
 	local ToSaveList, ldecompile, placename, elapse_t, SaveNotCreatableWillBeEnabled, RecoveredScripts, FlattenedInfo
+	local scriptSeen, scriptKeep
 
 	if OPTIONS.ReadMe then
 		RecoveredScripts = {}
@@ -4368,6 +4408,60 @@ local function synsaveinstance(...)
 			return
 		end
 		pcall(writefile, EXEC_STATE_FILE, service.HttpService:JSONEncode({ [EXEC_STATE_KEY] = ExecState }))
+	end
+
+	local SkipCrashed = OPTIONS.SkipCrashed and true or false
+	local crashedInstances
+	local skippedCrashed = 0
+	local skippedOnce = {}
+
+	local function instanceKey(instance)
+		local ok, id = pcall(function()
+			return instance:GetDebugId(0)
+		end)
+		if ok and type(id) == "string" and id ~= "" then
+			return id
+		end
+		local full = instance.ClassName
+		local nameOk, name = pcall(function()
+			return instance:GetFullName()
+		end)
+		if nameOk and type(name) == "string" then
+			full ..= "\0" .. name
+		end
+		return full
+	end
+
+	if SkipCrashed then
+		local saved = ExecState.crashedInstances
+		crashedInstances = type(saved) == "table" and saved or {}
+		ExecState.crashedInstances = crashedInstances
+		local pending = ExecState.pendingInstance
+		if type(pending) == "string" and pending ~= "" then
+			crashedInstances[pending] = true
+			ExecState.pendingInstance = nil
+			saveExecState()
+		end
+	end
+
+	-- Returns false when this instance crashed a previous save and must be skipped.
+	local function guardInstance(instance)
+		if not SkipCrashed then
+			return true
+		end
+		local key = instanceKey(instance)
+		if crashedInstances[key] then
+			if not skippedOnce[key] then
+				skippedOnce[key] = true
+				skippedCrashed += 1
+			end
+			return false
+		end
+		if ExecState.pendingInstance ~= key then
+			ExecState.pendingInstance = key
+			saveExecState()
+		end
+		return true
 	end
 
 	local writerFallback -- ! nil | "writefile" | "xml" when a broken writer forced a switch
@@ -4513,6 +4607,10 @@ local function synsaveinstance(...)
 		local TempRoot = Object or game
 
 		if mode == "full" then
+			if SaveInstanceOptions_valid.IgnoreDefaultProperties == nil then
+				IgnoreDefaultProperties = false
+				OPTIONS.IgnoreDefaultProperties = false
+			end
 			if not Object then
 				local Children = TempRoot:GetChildren()
 				if 0 < #Children then
@@ -4564,22 +4662,62 @@ local function synsaveinstance(...)
 				end
 			end
 		elseif mode == "scripts" then
-			-- TODO: Only save paths that lead to scripts (nothing else)
-			-- Currently saves paths along with children of each tree
-			for _, top in TempRoot:GetChildren() do
-				local stack, size = { top }, 1
+			scriptSeen = {}
+			scriptKeep = {}
+
+			local function keepSubtree(root)
+				local stack, size = { root }, 1
 				while 0 < size do
-					local instance = stack[size]
+					local inst = stack[size]
 					stack[size] = nil
 					size -= 1
-					if isLuaSourceContainer(instance) then
-						table.insert(tmp, top)
-						break
+					if typeof(inst) == "Instance" then
+						scriptKeep[inst] = true
+						for _, child in inst:GetChildren() do
+							size += 1
+							stack[size] = child
+						end
 					end
-					for _, child in instance:GetChildren() do
-						size += 1
-						stack[size] = child
+				end
+			end
+
+			for _, extra in tmp do
+				keepSubtree(extra)
+			end
+
+			local function mark(inst)
+				while inst and inst ~= TempRoot do
+					if scriptKeep[inst] then
+						return
 					end
+					scriptKeep[inst] = true
+					inst = inst.Parent
+				end
+			end
+
+			local stack, size = {}, 0
+			for _, child in TempRoot:GetChildren() do
+				size += 1
+				stack[size] = child
+			end
+			while 0 < size do
+				local instance = stack[size]
+				stack[size] = nil
+				size -= 1
+				scriptSeen[instance] = true
+				if isLuaSourceContainer(instance) then
+					mark(instance)
+				end
+				for _, child in instance:GetChildren() do
+					size += 1
+					stack[size] = child
+				end
+			end
+
+			local tmp_dict = arrayToDict(tmp)
+			for _, child in TempRoot:GetChildren() do
+				if scriptKeep[child] and not tmp_dict[child] then
+					table.insert(tmp, child)
 				end
 			end
 		end
@@ -4797,21 +4935,28 @@ local function synsaveinstance(...)
 
 		ldecompile = function(script)
 			-- local name = scr.ClassName .. scr.Name
-			local bytecode
+			local cacheKey
 			if ScriptCache then
-				local s
-				s, bytecode = getbytecode(script)
-				local cached
-
-				if s then
-					if not bytecode or bytecode == "" then
-						return "-- The Script is Empty"
-					end
-					cached = ldeccache[bytecode]
-				else
+				local s, bytecode = getbytecode(script)
+				if s and (not bytecode or bytecode == "") then
+					return "-- The Script is Empty"
+				end
+				if not s then
 					bytecode = nil
 				end
 
+				if bytecode and bytecode ~= "" then
+					cacheKey = bytecode
+				else
+					local idOk, id = pcall(function()
+						return script:GetDebugId(0)
+					end)
+					if idOk and type(id) == "string" and id ~= "" then
+						cacheKey = "id\0" .. id
+					end
+				end
+
+				local cached = cacheKey and ldeccache[cacheKey]
 				if cached then
 					if __DEBUG_MODE then
 						__DEBUG_MODE("Found in Cache", script:GetFullName())
@@ -4820,12 +4965,12 @@ local function synsaveinstance(...)
 				elseif DecompileJobless then
 					return "-- Not found in already decompiled ScriptCache"
 				end
-			else
-				if DecompileJobless then
-					return "-- Not found in already decompiled ScriptCache"
-				end
+			elseif DecompileJobless then
+				return "-- Not found in already decompiled ScriptCache"
+			end
 
-				-- task.wait() -- TODO Maybe remove?
+			if not guardInstance(script) then
+				return "-- Skipped (this script crashed a previous save)"
 			end
 
 			local ok, result = run_with_loading("Decompiling " .. script.Name, true, nil, decomp, script)
@@ -4841,8 +4986,8 @@ local function synsaveinstance(...)
 				output = "--[[ Failed to decompile. Reason:\n" .. (result or "") .. "\n]]"
 			end
 
-			if ScriptCache and bytecode then -- TODO there might(?) be an edgecase where it manages to decompile (built-in) even though getscriptbytecode failed, and the output won't get cached
-				ldeccache[bytecode] = output -- ? Should we cache even if it timed out?
+			if ScriptCache and cacheKey then
+				ldeccache[cacheKey] = output -- ? Should we cache even if it timed out?
 				if __DEBUG_MODE then
 					__DEBUG_MODE("Cached", script:GetFullName())
 				end
@@ -5017,7 +5162,7 @@ local function synsaveinstance(...)
 			return InstanceOverride
 		end
 
-		if InstanceName ~= ClassName then -- TODO Compare against default instance instead (TouchTransmitter is called TouchInterest by default)
+		if InstanceName ~= defaultInstanceName(ClassName) then
 			InstanceOverride = { Properties = { Name = "[" .. ClassName .. "] " .. InstanceName } }
 			InstancesOverrides[instance] = InstanceOverride
 		end
@@ -5172,13 +5317,19 @@ local function synsaveinstance(...)
 			return sourceFor(instance, decompileIgnoreMap[instance])
 		end
 
+		if Special and SpecialAllow and not SpecialAllow[PropertyName] then
+			return __BREAK
+		end
+
 		local Category, Optional = property.Category, property.Optional
 
 		if CanRead ~= false then
 			local GHPKey = (Category == "Enum" or Category == "Class") and Category or ValueType
 
 			if Special then
-				if property.Shadows and GHPShadowed then
+				if not guardInstance(instance) then
+					raw = __BREAK
+				elseif property.Shadows and GHPShadowed then
 					property.CanRead = false
 				elseif gethiddenproperty and ghpDatatypeAllowed(GHPKey) then
 					local ok, result = pcall(gethiddenproperty, instance, PropertyName)
@@ -5205,20 +5356,31 @@ local function synsaveinstance(...)
 				raw = instance[PropertyName]
 			else
 				local ok, result = pcall(index, instance, PropertyName)
+				local probed = true
 				if ok then
 					raw = result
-				elseif not (property.Shadows and GHPShadowed) and gethiddenproperty and ghpDatatypeAllowed(GHPKey) then
-					ok, result = pcall(gethiddenproperty, instance, PropertyName)
-					ghpDatatypeReport(GHPKey, ok and not filterPropVal(result, property, Category, Optional))
-					if ok then
-						raw = result
-						property.Special = true
+				elseif
+					not (property.Shadows and GHPShadowed)
+					and gethiddenproperty
+					and (not SpecialAllow or SpecialAllow[PropertyName])
+				then
+					if not guardInstance(instance) then
+						probed = false
+					elseif ghpDatatypeAllowed(GHPKey) then
+						ok, result = pcall(gethiddenproperty, instance, PropertyName)
+						ghpDatatypeReport(GHPKey, ok and not filterPropVal(result, property, Category, Optional))
+						if ok then
+							raw = result
+							property.Special = true
+						end
 					end
 				end
 
-				property.CanRead = ok
+				if probed then
+					property.CanRead = ok
+				end
 
-				if not ok or filterPropVal(raw, property, Category, Optional) then
+				if not probed or not ok or filterPropVal(raw, property, Category, Optional) then
 					raw = __BREAK
 				end
 			end
@@ -5289,8 +5451,9 @@ local function synsaveinstance(...)
 			return cached
 		end
 
-		local prop_list = {}
 		local layer = ClassList[className]
+		local prop_list = layer and table.clone(layer.Properties) or {}
+		layer = layer and ClassList[layer.Superclass]
 		while layer do
 			local layer_props = layer.Properties
 			table.move(layer_props, 1, #layer_props, #prop_list + 1, prop_list)
@@ -5329,6 +5492,10 @@ local function synsaveinstance(...)
 		local function recur(instance, parent, ldIgnore, depth, anchor)
 			if entries[instance] then
 				return -- already collected via another root
+			end
+
+			if scriptSeen and scriptSeen[instance] and not scriptKeep[instance] then
+				return -- scripts mode keeps only the chain of parents that leads to a script
 			end
 
 			yieldIfDue()
@@ -5843,7 +6010,7 @@ local function synsaveinstance(...)
 		end
 
 		local function ReturnItem(className, instance)
-			return '<Item class="' .. className .. '" referent="' .. refs[instance] .. '"><Properties>' -- TODO: Ideally this shouldn't return <Properties> as well as the line below to close it IF  IgnorePropertiesOfNotScriptsOnScriptsMode is Enabled OR If all properties are default (reduces file size by at least 1.4%)
+			return '<Item class="' .. className .. '" referent="' .. refs[instance] .. '">'
 		end
 
 		local function save_cache()
@@ -5875,6 +6042,11 @@ local function synsaveinstance(...)
 
 				savebuffer[savebuffer_size] = ReturnItem(entry.tag, instance)
 				savebuffer_size += 1
+
+				local propertiesOpen = savebuffer_size
+				savebuffer[savebuffer_size] = "<Properties>"
+				savebuffer_size += 1
+				local propertiesBody = savebuffer_size
 
 				if entry.propsOnly then
 					for propName, value in entry.override.Properties do
@@ -6001,8 +6173,13 @@ local function synsaveinstance(...)
 					end
 				end
 
-				savebuffer[savebuffer_size] = "</Properties>"
-				savebuffer_size += 1
+				if savebuffer_size == propertiesBody then
+					savebuffer[propertiesOpen] = nil
+					savebuffer_size = propertiesOpen
+				else
+					savebuffer[savebuffer_size] = "</Properties>"
+					savebuffer_size += 1
+				end
 
 				if SaveCacheInterval < savebuffer_size then
 					save_cache()
@@ -6291,11 +6468,19 @@ local function synsaveinstance(...)
 ]]
 				end
 
+				local skipNote = ""
+				if skippedCrashed > 0 then
+					skipNote = "\t\tSkipped "
+						.. skippedCrashed
+						.. " instance(s) that crashed a previous save. Turn SkipCrashed off to try them again.\n\n"
+				end
+
 				return table.concat({
 					"--[[\n",
 					"\t\tThank you for using UniversalSynSaveInstance (Join to Copy Games) https://discord.gg/wx4ThpAsmw\n\n",
 					recoveredNote,
 					flattenedNote,
+					skipNote,
 					ghpFailureHeader,
 					writerFailureHeader,
 					binaryNote,
@@ -7119,6 +7304,17 @@ local function synsaveinstance(...)
 	local ok, err = xpcall(save_game, function(err)
 		return debug.traceback(err)
 	end)
+
+	if SkipCrashed then
+		local pending = ExecState.pendingInstance
+		if ok then
+			ExecState.pendingInstance = nil
+		elseif type(pending) == "string" and pending ~= "" then
+			crashedInstances[pending] = true
+			ExecState.pendingInstance = nil
+		end
+		saveExecState()
+	end
 
 	if OPTIONS.BoostFPS then
 		pcall(function()
